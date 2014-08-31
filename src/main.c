@@ -43,44 +43,45 @@ void set_reply(int state)
 uchar   usbFunctionSetup(uchar data[8])
 {
 	usbRequest_t *rq =  (usbRequest_t*) &data[0];
-	if (rq->bRequest == 0xff)
+	uint8_t req = rq->bRequest;
+	if (req == 0xff)
 	{
 		save_state((uint8_t*)rq->wValue.word);
 	}else
-		if (rq->bRequest == 0xfa)
+		if (req == 0xfa)
 		{
 			load_state((uint8_t*)rq->wValue.word);
 		} else {
-			if (rq->bRequest < 8) {
+			if (req < 8) {
 				if (rq->wValue.bytes[0]==2)
 				{
-					set_reply(PORTB & (1 << rq->bRequest));
+					set_reply(PORTB & (1 << req));
 					usbMsgPtr = usbreply;
 					return 2;
 					
 				}
 				else if (rq->wValue.bytes[0])  {
-					PORTB|=(1 << rq->bRequest) ;
+					PORTB|=(1 << req) ;
 				} else {
-					PORTB&=~(1 << rq->bRequest);
+					PORTB&=~(1 << req);
 				}	
 			}
-			rq->bRequest -= 8;
-			if (rq->bRequest < 8)
+			req -= 8;
+			if (req < 8)
 			{
 				if (rq->wValue.bytes[0]==2)
 				{
-					set_reply(PORTD & (1 << rq->bRequest));
+					set_reply(PORTD & (1 << req));
 					usbMsgPtr = usbreply;
 					return 2;
 					
 				}
 				else if (rq->wValue.bytes[0]) 
 				{
-					PORTD|=(1 << rq->bRequest) ;
+					PORTD|=(1 << req) ;
 				}else
 				{
-					PORTD&=~(1 << rq->bRequest);
+					PORTD&=~(1 << req);
 				}	
 			}
 		}
@@ -88,19 +89,24 @@ uchar   usbFunctionSetup(uchar data[8])
 
 }
 
+#define USB_BITS (1 << CONFIG_USB_CFG_DMINUS_BIT | 1 << CONFIG_USB_CFG_DPLUS_BIT)
 inline void usbReconnect()
 {
-        DDRD=0xff;
-	_delay_ms(250);
-        DDRD=0xf3;
+	PORTD &= ~USB_BITS;
+        DDRD  |= USB_BITS;
+	_delay_ms(1250);
+        DDRD  &= ~USB_BITS;
+	/* Don't reenable pullup - screws up some hubs */
 }
 
 
 ANTARES_APP(main_app)
 {
 	DDRB=0xff;
+	DDRD=0xff;
+	PORTD=0xff;
+	load_state((uint8_t*)0x0000);
 	usbReconnect();
-	load_state((uint8_t*)0x0001);
 	usbInit();
 	while(1)
 	{
