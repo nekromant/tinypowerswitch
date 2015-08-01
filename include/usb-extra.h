@@ -1,0 +1,7 @@
+#ifndef __HDR_H
+#define __HDR_H
+
+
+#define USB_CFG_DESCR_PROPS_STRING_SERIAL_NUMBER (USB_PROP_IS_DYNAMIC | USB_PROP_IS_RAM)
+
+#endif

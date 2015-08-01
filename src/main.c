@@ -5,6 +5,7 @@
 #include <arch/vusb/usbdrv.h>
 #include <compat/deprecated.h>
 #include <util/delay.h>
+#include <stdbool.h>
 
 /* 
    typedef struct usbRequest{
@@ -16,77 +17,136 @@
    }usbRequest_t;
 */
 
+
+
+#define CONF_EEPROM_OFFSET 2 
+#define CONF_MAGIC_OFFSET  1
+#define USBDESCR_OFFSET    10 
+
+static unsigned char usbreplybuf[32];
+static uchar wrLen; 
+static void *wrPos;
+
+enum requests {
+	RQ_SAVE=0, 
+	RQ_LOAD,
+	RQ_BIT_SET,
+	RQ_BIT_GET,
+	RQ_SETSERIAL
+};
+
 #define USBRQ_TYPE_MASK 0x60
 
 
-void load_state(uint8_t* off)
+enum { 
+	REG_PORT=0,
+	REG_DDR,
+	REG_PIN
+};
+
+struct ioport {
+	volatile uint8_t* port;
+	volatile uint8_t* pin;
+	volatile uint8_t* ddr;
+} __attribute__((packed));
+
+struct ioport ports[] = {
+	{ &PORTB, &DDRB, &PINB },
+	{ &PORTD, &DDRD, &PIND },
+};
+
+#define CLEN (ARRAY_SIZE(ports)*2)
+
+
+void save_state()
 {
-	PORTD=eeprom_read_byte(off);
-	PORTB=eeprom_read_byte(off+1);
+	eeprom_write_byte((void *)1, DDRD);
+	eeprom_write_byte((void *)2, PORTD);
+	eeprom_write_byte((void *)3, DDRB);
+	eeprom_write_byte((void *)4, PORTB);
 }
 
-void save_state(uint8_t* off)
+void load_state()
 {
-	eeprom_write_byte(off,PORTD);
-	eeprom_write_byte(off+1,PORTB);
+	DDRD = eeprom_read_byte((void *)1);
+	PORTD = eeprom_read_byte((void *)2);
+	DDRB = eeprom_read_byte((void *)3);
+	PORTB = eeprom_read_byte((void *)4);
 }
 
-char usbreply[2];
-void set_reply(int state) 
+
+usbMsgLen_t usbFunctionDescriptor(struct usbRequest *rq)
 {
-	if (state)
-		usbreply[0]='1';
-	else
-		usbreply[0]='0';
+	int *rbuf = (int *) usbreplybuf;
+	eeprom_read_block((void*) usbreplybuf, (const void *) USBDESCR_OFFSET, ARRAY_SIZE(usbreplybuf));
+	usbMsgPtr = usbreplybuf;
+	return (rbuf[0] & ~(3<<8));
 }
+
+
+void greg_write(uint8_t gpio, uint8_t op, uint8_t v)
+{
+	uint8_t i = 0; 
+	while (gpio > 7) {
+		i++;
+		gpio-=8;
+	};
+
+	volatile uint8_t **r = (volatile uint8_t **) &ports[i];
+
+	*(r[op]) &= ~(1<<gpio);
+	*(r[op]) |=  (v<<gpio);
+}
+
+uint8_t greg_read(uint8_t gpio, uint8_t op)
+{
+	uint8_t i = 0; 
+	while (gpio > 7) {
+		i++;
+		gpio-=8;
+	};
+	volatile uint8_t **r = (volatile uint8_t **) &ports[i];
+	return (*(r[op]) & (1 << gpio));
+}
+
+
 
 uchar   usbFunctionSetup(uchar data[8])
 {
 	usbRequest_t *rq =  (usbRequest_t*) &data[0];
 	uint8_t req = rq->bRequest;
-	if (req == 0xff)
-	{
-		save_state((uint8_t*)rq->wValue.word);
-	}else
-		if (req == 0xfa)
-		{
-			load_state((uint8_t*)rq->wValue.word);
-		} else {
-			if (req < 8) {
-				if (rq->wValue.bytes[0]==2)
-				{
-					set_reply(PORTB & (1 << req));
-					usbMsgPtr = usbreply;
-					return 2;
-					
-				}
-				else if (rq->wValue.bytes[0])  {
-					PORTB|=(1 << req) ;
-				} else {
-					PORTB&=~(1 << req);
-				}	
-			}
-			req -= 8;
-			if (req < 8)
-			{
-				if (rq->wValue.bytes[0]==2)
-				{
-					set_reply(PORTD & (1 << req));
-					usbMsgPtr = usbreply;
-					return 2;
-					
-				}
-				else if (rq->wValue.bytes[0]) 
-				{
-					PORTD|=(1 << req) ;
-				}else
-				{
-					PORTD&=~(1 << req);
-				}	
-			}
-		}
-	return 0;
 
+	switch (req) { 
+	case RQ_SAVE:
+		save_state();
+		break;
+	case RQ_LOAD:
+		load_state();
+		break;
+	case RQ_BIT_SET:
+		greg_write(rq->wValue.bytes[1], rq->wValue.bytes[0], rq->wIndex.bytes[0]);
+		break;
+	case RQ_BIT_GET:
+		usbreplybuf[0] = greg_read(rq->wValue.bytes[0], rq->wIndex.bytes[0]);
+		usbMsgPtr = usbreplybuf;
+		return 1;
+		break;
+	case RQ_SETSERIAL:
+		wrPos = (void *) USBDESCR_OFFSET;
+		wrLen = rq->wLength.bytes[0];
+		return USB_NO_MSG;
+		break;
+	};
+	return 0;
+}
+
+uchar usbFunctionWrite(uchar *data, uchar len)
+{
+	eeprom_write_block(data, wrPos, len);
+	wrPos += len;
+	wrLen -= len;
+	/* Break the protocol - save the flash! */
+	return (wrLen == 0);
 }
 
 #define USB_BITS (1 << CONFIG_USB_CFG_DMINUS_BIT | 1 << CONFIG_USB_CFG_DPLUS_BIT)
@@ -99,13 +159,9 @@ inline void usbReconnect()
 	/* Don't reenable pullup - screws up some hubs */
 }
 
-
 ANTARES_APP(main_app)
 {
-	DDRB=0xff;
-	DDRD=0xff;
-	PORTD=0xff;
-	load_state((uint8_t*)0x0000);
+	load_state();
 	usbReconnect();
 	usbInit();
 	while(1)
