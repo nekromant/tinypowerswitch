@@ -31,7 +31,8 @@ enum requests {
 	RQ_BIT_SET,
 	RQ_BIT_GET,
 	RQ_SETSERIAL,
-	RQ_RAWIO
+	RQ_RAWIO,
+	RQ_PWMWRITE,
 };
 
 #define USBRQ_TYPE_MASK 0x60
@@ -41,6 +42,17 @@ enum {
 	REG_PORT=0,
 	REG_DDR,
 	REG_PIN
+};
+
+enum { 
+	EEP_SHIT=0, /* Avoid byte 0 corruption at powerloss */
+	EEP_SERVALID,
+	EEP_CONFVALID,
+	EEP_DDRD,
+	EEP_PORTD,
+	EEP_DDRB,
+	EEP_PORTB
+	
 };
 
 struct ioport {
@@ -57,25 +69,32 @@ struct ioport ports[] = {
 #define CLEN (ARRAY_SIZE(ports)*2)
 
 
-void save_state()
+static inline void save_state()
 {
-	eeprom_write_byte((void *)1, DDRD);
-	eeprom_write_byte((void *)2, PORTD);
-	eeprom_write_byte((void *)3, DDRB);
-	eeprom_write_byte((void *)4, PORTB);
+	eeprom_write_byte((void *) EEP_SERVALID, 0xb7);
+	eeprom_write_byte((void *) EEP_DDRD,     DDRD);
+	eeprom_write_byte((void *) EEP_PORTD,    PORTD);
+	eeprom_write_byte((void *) EEP_DDRB,     DDRB);
+	eeprom_write_byte((void *) EEP_PORTB,    PORTB);
 }
 
 void load_state()
 {
-	DDRD = eeprom_read_byte((void *)1);
-	PORTD = eeprom_read_byte((void *)2);
-	DDRB = eeprom_read_byte((void *)3);
-	PORTB = eeprom_read_byte((void *)4);
+	if ((0xb7 == eeprom_read_byte((void *)  EEP_CONFVALID)))
+		return; /* Virgin device, no serial */
+
+	DDRD = eeprom_read_byte((void *)  EEP_DDRD);
+	PORTD = eeprom_read_byte((void *) EEP_PORTD);
+	DDRB = eeprom_read_byte((void *)  EEP_DDRB);
+	PORTB = eeprom_read_byte((void *) EEP_PORTB);
 }
 
 
 usbMsgLen_t usbFunctionDescriptor(struct usbRequest *rq)
 {
+	if ((0xb7 == eeprom_read_byte((void *)  EEP_SERVALID)))
+		return 0; /* Virgin device, no serial */
+	
 	int *rbuf = (int *) usbreplybuf;
 	eeprom_read_block((void*) usbreplybuf, (const void *) USBDESCR_OFFSET, ARRAY_SIZE(usbreplybuf));
 	usbMsgPtr = usbreplybuf;
@@ -83,7 +102,7 @@ usbMsgLen_t usbFunctionDescriptor(struct usbRequest *rq)
 }
 
 
-void greg_write(uint8_t gpio, uint8_t op, uint8_t v)
+static void inline greg_write(uint8_t gpio, uint8_t op, uint8_t v)
 {
 	uint8_t i = 0; 
 	while (gpio > 7) {
@@ -97,7 +116,7 @@ void greg_write(uint8_t gpio, uint8_t op, uint8_t v)
 	*(r[op]) |=  (v<<gpio);
 }
 
-uint8_t greg_read(uint8_t gpio, uint8_t op)
+static uint8_t inline greg_read(uint8_t gpio, uint8_t op)
 {
 	uint8_t i = 0; 
 	while (gpio > 7) {
@@ -133,13 +152,19 @@ uchar   usbFunctionSetup(uchar data[8])
 	case RQ_SETSERIAL:
 		wrPos = (void *) USBDESCR_OFFSET;
 		wrLen = rq->wLength.bytes[0];
+		/* We have a valid serial now! */
+		eeprom_write_byte((void *) EEP_SERVALID, 0xb7);
 		return USB_NO_MSG;
 		break;
 	case RQ_RAWIO: { 
 		volatile uint8_t *ptr = (volatile uint8_t *) rq->wIndex.word;
 		*ptr  = rq->wValue.bytes[0];
-		break;
+		break;			
 	}
+	case RQ_PWMWRITE:
+		OCR1A = rq->wValue.word;
+		OCR1B = rq->wIndex.word;
+		break;
 	};
 	return 0;
 }
@@ -163,13 +188,10 @@ inline void usbReconnect()
 	/* Don't reenable pullup - screws up some hubs */
 }
 
-ANTARES_APP(main_app)
-{
+int main() {
 	load_state();
 	usbReconnect();
 	usbInit();
-	while(1)
-	{
+	while (1) 
 		usbPoll();
-	}
 }
