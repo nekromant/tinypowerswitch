@@ -18,9 +18,7 @@
 */
 
 
-
-#define CONF_EEPROM_OFFSET 2 
-#define CONF_MAGIC_OFFSET  1
+#define CONF_EEPROM_OFFSET 2
 #define USBDESCR_OFFSET    10 
 
 static unsigned char usbreplybuf[32];
@@ -32,7 +30,8 @@ enum requests {
 	RQ_LOAD,
 	RQ_BIT_SET,
 	RQ_BIT_GET,
-	RQ_SETSERIAL
+	RQ_SETSERIAL,
+	RQ_RAWIO
 };
 
 #define USBRQ_TYPE_MASK 0x60
@@ -136,6 +135,11 @@ uchar   usbFunctionSetup(uchar data[8])
 		wrLen = rq->wLength.bytes[0];
 		return USB_NO_MSG;
 		break;
+	case RQ_RAWIO: { 
+		volatile uint8_t *ptr = (volatile uint8_t *) rq->wIndex.word;
+		*ptr  = rq->wValue.bytes[0];
+		break;
+	}
 	};
 	return 0;
 }
