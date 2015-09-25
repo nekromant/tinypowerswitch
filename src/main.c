@@ -18,10 +18,35 @@
 */
 
 
+#define CONFIG_SERVO_COUNT 8
+
+static char r;
+static uint16_t servo_nextpos[CONFIG_SERVO_COUNT];
+static uint16_t servo_pos[CONFIG_SERVO_COUNT];
+/* TODO: We support 12 16 18 and 20 Mhz crystal */
+/* 12M is quite junky and unusable */
+
+#if F_CPU == 20000000
+static uint16_t next_icr=62500;
+#endif
+
+#if F_CPU == 18000000
+static uint16_t next_icr=4500;
+#endif
+
+#if F_CPU == 16000000
+static uint16_t next_icr=4000;
+#endif
+
+#if F_CPU == 12000000
+static uint16_t next_icr=3000;
+#endif
+
+
 #define CONF_EEPROM_OFFSET 2
 #define USBDESCR_OFFSET    10 
 
-static unsigned char usbreplybuf[32];
+static unsigned char usbreplybuf[1];
 static uchar wrLen; 
 static void *wrPos;
 
@@ -30,9 +55,7 @@ enum requests {
 	RQ_LOAD,
 	RQ_BIT_SET,
 	RQ_BIT_GET,
-	RQ_SETSERIAL,
-	RQ_RAWIO,
-	RQ_PWMWRITE,
+	RQ_WRPOS,
 };
 
 #define USBRQ_TYPE_MASK 0x60
@@ -127,7 +150,40 @@ static uint8_t inline greg_read(uint8_t gpio, uint8_t op)
 	return (*(r[op]) & (1 << gpio));
 }
 
+ISR(TIMER1_OVF_vect)
+{
+	ICR1=next_icr;
+	r=1;
+}
 
+void flip()
+{
+/* load up next values, we're phase correct. Somewhat */
+	char i;
+	for (i=0; i<CONFIG_SERVO_COUNT; i++)
+	{
+		servo_pos[i]=servo_nextpos[i];
+	}
+/* Iterate over enabled channels */
+	for (i=0;i<8;i++)
+	{
+		if (servo_pos[i]) PORTB |= (1<<i);
+	}
+	r=0;
+}
+
+void loop_outputs()
+{
+	int i;
+	for (i=0;i<8;i++)
+	{
+		if (servo_pos[i] && (TCNT1 > servo_pos[i]))
+		{
+			PORTB &= ~(1<<i);
+		}
+	}
+	if (r) flip();
+}
 
 uchar   usbFunctionSetup(uchar data[8])
 {
@@ -148,34 +204,12 @@ uchar   usbFunctionSetup(uchar data[8])
 		usbreplybuf[0] = greg_read(rq->wValue.bytes[0], rq->wIndex.bytes[0]);
 		usbMsgPtr = usbreplybuf;
 		return 1;
+	case RQ_WRPOS:
+		servo_nextpos[rq->wIndex.bytes[0]]=rq->wValue.word;
 		break;
-	case RQ_SETSERIAL:
-		wrPos = (void *) USBDESCR_OFFSET;
-		wrLen = rq->wLength.bytes[0];
-		/* We have a valid serial now! */
-		eeprom_write_byte((void *) EEP_SERVALID, 0xb7);
-		return USB_NO_MSG;
-		break;
-	case RQ_RAWIO: { 
-		volatile uint8_t *ptr = (volatile uint8_t *) rq->wIndex.word;
-		*ptr  = rq->wValue.bytes[0];
-		break;			
-	}
-	case RQ_PWMWRITE:
-		OCR1A = rq->wValue.word;
-		OCR1B = rq->wIndex.word;
-		break;
-	};
-	return 0;
-}
 
-uchar usbFunctionWrite(uchar *data, uchar len)
-{
-	eeprom_write_block(data, wrPos, len);
-	wrPos += len;
-	wrLen -= len;
-	/* Break the protocol - save the flash! */
-	return (wrLen == 0);
+	}
+	return 0;
 }
 
 #define USB_BITS (1 << CONFIG_USB_CFG_DMINUS_BIT | 1 << CONFIG_USB_CFG_DPLUS_BIT)
@@ -191,8 +225,16 @@ inline void usbReconnect()
 int main() {
 	load_state();
 	usbReconnect();
+
+	TCCR1A = (1<<WGM11);
+	TCCR1B = (1<<WGM13|1<<WGM12|1<<CS11);
+	TIMSK = (1<<TOIE1);
+	ICR1=next_icr; //20ms
+
 	usbInit();
 	sei();
-	while (1) 
+	while (1) {
 		usbPoll();
+		loop_outputs();
+	}
 }
