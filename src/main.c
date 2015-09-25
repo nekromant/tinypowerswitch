@@ -192,6 +192,7 @@ int main() {
 	load_state();
 	usbReconnect();
 	usbInit();
+	sei();
 	while (1) 
 		usbPoll();
 }
